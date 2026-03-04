@@ -72,6 +72,9 @@ struct AgentConfiguration: Codable, Equatable {
     var maxTokens: Int?
     var enabledTools: [String]
     var securityPolicy: SecurityPolicy
+    /// When true the agent is given its own virtual workspace screen and is
+    /// accessible from the Lumi browser extension panel.
+    var browserWorkspaceEnabled: Bool
 
     init(
         provider: AIProvider,
@@ -80,7 +83,8 @@ struct AgentConfiguration: Codable, Equatable {
         temperature: Double? = 0.7,
         maxTokens: Int? = 4096,
         enabledTools: [String] = [],
-        securityPolicy: SecurityPolicy = SecurityPolicy()
+        securityPolicy: SecurityPolicy = SecurityPolicy(),
+        browserWorkspaceEnabled: Bool = false
     ) {
         self.provider = provider
         self.model = model
@@ -89,6 +93,7 @@ struct AgentConfiguration: Codable, Equatable {
         self.maxTokens = maxTokens
         self.enabledTools = enabledTools
         self.securityPolicy = securityPolicy
+        self.browserWorkspaceEnabled = browserWorkspaceEnabled
     }
 }
 

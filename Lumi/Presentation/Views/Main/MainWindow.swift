@@ -228,6 +228,8 @@ struct ContentListView: View {
                 AgentSpaceView()
             case .hotkeySpace:
                 HotkeySpaceListView()
+            case .browser:
+                BrowserWorkspaceListView()
             case .health:
                 HealthListView()
             case .history:
@@ -268,6 +270,13 @@ struct DetailView: View {
                 }
             case .hotkeySpace:
                 HotkeySpaceDetailView()
+            case .browser:
+                if let agentId = appState.selectedBrowserAgentId,
+                   let agent = appState.agents.first(where: { $0.id == agentId }) {
+                    BrowserWorkspaceDetailView(agent: agent)
+                } else {
+                    EmptyDetailView(message: "Select an agent to view its browser workspace")
+                }
             case .health:
                 HealthDetailView()
             case .history:

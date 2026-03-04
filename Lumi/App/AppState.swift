@@ -69,6 +69,9 @@ final class AppState: ObservableObject {
     @Published var toolCallHistory: [ToolCallRecord] = []
     @Published var selectedHistoryAgentId: UUID?
 
+    // MARK: - Browser Workspace
+    @Published var selectedBrowserAgentId: UUID?
+
     // MARK: - Automations
     @Published var automations: [AutomationRule] = [] {
         didSet { saveAutomations() }
@@ -1303,6 +1306,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     case agents      = "Agents"
     case agentSpace  = "Agent Space"
     case hotkeySpace = "Hotkey Space"
+    case browser     = "Browser Workspace"
     case health      = "Health"
     case history     = "History"
     case automation  = "Automations"
@@ -1316,6 +1320,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .agents:      return "cpu"
         case .agentSpace:  return "bubble.left.and.bubble.right.fill"
         case .hotkeySpace: return "keyboard"
+        case .browser:     return "globe"
         case .health:      return "heart.fill"
         case .history:     return "clock.arrow.circlepath"
         case .automation:  return "bolt.horizontal"

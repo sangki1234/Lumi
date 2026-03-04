@@ -678,6 +678,34 @@ enum MediaTools {
             throw ToolError.commandFailed(result.error ?? "screencapture failed")
         }
     }
+
+    /// Capture the virtual workspace screen assigned to `agentID` as a JPEG.
+    /// The captured image is written to `path` if provided, and the path is returned.
+    static func captureAgentScreen(agentIDString: String, path: String) async throws -> String {
+        guard let agentID = UUID(uuidString: agentIDString) else {
+            throw ToolError.commandFailed("Invalid agentId '\(agentIDString)'")
+        }
+
+        let destination: String
+        if path.isEmpty {
+            destination = (NSHomeDirectory() as NSString)
+                .appendingPathComponent("Desktop/lumi_agent_screen_\(agentIDString.prefix(8)).jpg")
+        } else {
+            destination = path
+        }
+
+        guard let jpeg = await MainActor.run(body: {
+            VirtualDisplayManager.shared.captureWorkspace(for: agentID, maxWidth: 1440)
+        }) else {
+            throw ToolError.commandFailed(
+                "No virtual workspace found for agent \(agentIDString). " +
+                "Enable 'Browser Workspace' for the agent first.")
+        }
+
+        let url = URL(fileURLWithPath: destination)
+        try jpeg.write(to: url)
+        return "Agent workspace screenshot saved to \(destination)"
+    }
 }
 
 // MARK: - Code Tools

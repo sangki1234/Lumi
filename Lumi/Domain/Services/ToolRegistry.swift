@@ -856,6 +856,32 @@ final class ToolRegistry {
             }
         ))
 
+        register(RegisteredTool(
+            name: "capture_agent_screen",
+            description: "Capture the virtual workspace screen assigned to a specific agent and save it as a JPEG. Use this to see what the agent is working on in its isolated browser workspace.",
+            category: .screenshot,
+            riskLevel: .low,
+            parameters: AIToolParameters(
+                properties: [
+                    "agentId": AIToolProperty(
+                        type: "string",
+                        description: "The UUID of the agent whose workspace screen to capture"
+                    ),
+                    "path": AIToolProperty(
+                        type: "string",
+                        description: "Destination file path (default: ~/Desktop/lumi_agent_screen_<id>.jpg)"
+                    )
+                ],
+                required: ["agentId"]
+            ),
+            handler: { args in
+                try await MediaTools.captureAgentScreen(
+                    agentIDString: args["agentId"] ?? "",
+                    path: args["path"] ?? ""
+                )
+            }
+        ))
+
         // MARK: Code Execution
 
         register(RegisteredTool(
