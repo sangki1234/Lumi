@@ -228,6 +228,8 @@ struct ContentListView: View {
                 AgentSpaceView()
             case .hotkeySpace:
                 HotkeySpaceListView()
+            case .browser:
+                BrowserWorkspaceListView()
             case .health:
                 HealthListView()
             case .history:
@@ -268,6 +270,13 @@ struct DetailView: View {
                 }
             case .hotkeySpace:
                 HotkeySpaceDetailView()
+            case .browser:
+                if let agentId = appState.selectedBrowserAgentId,
+                   let agent = appState.agents.first(where: { $0.id == agentId }) {
+                    BrowserWorkspaceDetailView(agent: agent)
+                } else {
+                    EmptyDetailView(message: "Select an agent to view its browser workspace")
+                }
             case .health:
                 HealthDetailView()
             case .history:
@@ -353,6 +362,227 @@ struct HotkeySpaceDetailView: View {
             ChatView(conversationId: convId)
         } else {
             EmptyDetailView(message: "Use a global hotkey to start Hotkey Space.")
+        }
+    }
+}
+
+// MARK: - Browser Workspace
+
+/// List of all agents that have Browser Workspace enabled, with their tile slot info.
+struct BrowserWorkspaceListView: View {
+    @EnvironmentObject var appState: AppState
+    @ObservedObject private var vdm = VirtualDisplayManager.shared
+    @ObservedObject private var bws = BrowserWorkspaceServer.shared
+
+    private var workspaceAgents: [Agent] {
+        appState.agents.filter { $0.configuration.browserWorkspaceEnabled }
+    }
+
+    var body: some View {
+        Group {
+            if workspaceAgents.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "globe")
+                        .font(.system(size: 40))
+                        .foregroundStyle(.secondary)
+                    Text("No browser workspace agents")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                    Text("Enable "Browser Workspace" on an agent to give it a 4 000×4 000 tile on the shared virtual canvas.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(workspaceAgents, selection: $appState.selectedBrowserAgentId) { agent in
+                    BrowserWorkspaceAgentRow(agent: agent, tile: vdm.tiles[agent.id])
+                        .tag(agent.id)
+                }
+                .navigationTitle("Browser Workspace")
+                .toolbar {
+                    ToolbarItem {
+                        Button {
+                            NSWorkspace.shared.open(
+                                URL(string: "http://localhost:47287/panel")!)
+                        } label: {
+                            Label("Open Panel", systemImage: "arrow.up.right.square")
+                        }
+                        .help("Open the browser workspace panel at http://localhost:47287/panel")
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct BrowserWorkspaceAgentRow: View {
+    let agent: Agent
+    let tile: AgentTile?
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(agent.avatarColor)
+                .frame(width: 32, height: 32)
+                .overlay(
+                    Text(agent.name.prefix(1))
+                        .font(.caption).fontWeight(.bold).foregroundColor(.white)
+                )
+            VStack(alignment: .leading, spacing: 2) {
+                Text(agent.name).font(.callout).fontWeight(.medium)
+                if let tile {
+                    Text("Slot \(tile.slot) · (\(Int(tile.tileOrigin.x)), \(Int(tile.tileOrigin.y)))")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("No tile assigned yet")
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
+            }
+            Spacer()
+            if tile != nil {
+                Image(systemName: "circle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+/// Detail panel for a single agent's browser tile — shows tile info and a
+/// "Open browser panel" shortcut.
+struct BrowserWorkspaceDetailView: View {
+    let agent: Agent
+    @ObservedObject private var vdm = VirtualDisplayManager.shared
+
+    private var tile: AgentTile? { vdm.tiles[agent.id] }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+
+                // Header
+                HStack(spacing: 14) {
+                    Circle()
+                        .fill(agent.avatarColor)
+                        .frame(width: 48, height: 48)
+                        .overlay(
+                            Text(agent.name.prefix(1))
+                                .font(.title3).fontWeight(.bold).foregroundColor(.white)
+                        )
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(agent.name).font(.title2).fontWeight(.semibold)
+                        Text("Browser Workspace Agent")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                Divider()
+
+                // Canvas info
+                GroupBox("Shared Virtual Canvas") {
+                    Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 8) {
+                        GridRow {
+                            Text("Canvas size").foregroundStyle(.secondary)
+                            Text("20 000 × 20 000 px")
+                        }
+                        GridRow {
+                            Text("Tile size").foregroundStyle(.secondary)
+                            Text("4 000 × 4 000 px per agent")
+                        }
+                        GridRow {
+                            Text("Max agents").foregroundStyle(.secondary)
+                            Text("25 (5×5 grid)")
+                        }
+                        GridRow {
+                            Text("Virtual display").foregroundStyle(.secondary)
+                            Text(vdm.virtualDisplayID != nil
+                                 ? "Active (ID \(vdm.virtualDisplayID!))"
+                                 : "Fallback off-screen mode")
+                                .foregroundStyle(vdm.virtualDisplayID != nil ? .green : .orange)
+                        }
+                    }
+                    .font(.callout)
+                    .padding(.vertical, 4)
+                }
+
+                // Tile assignment
+                GroupBox("Agent Tile") {
+                    if let tile {
+                        Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 8) {
+                            GridRow {
+                                Text("Slot").foregroundStyle(.secondary)
+                                Text("\(tile.slot)")
+                            }
+                            GridRow {
+                                Text("Origin").foregroundStyle(.secondary)
+                                Text("(\(Int(tile.tileOrigin.x)), \(Int(tile.tileOrigin.y)))")
+                            }
+                            GridRow {
+                                Text("Window ID").foregroundStyle(.secondary)
+                                Text("\(tile.windowID)")
+                            }
+                            if let url = tile.currentURL {
+                                GridRow {
+                                    Text("Current URL").foregroundStyle(.secondary)
+                                    Text(url)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                            }
+                        }
+                        .font(.callout)
+                        .padding(.vertical, 4)
+                    } else {
+                        HStack {
+                            Image(systemName: "exclamationmark.triangle")
+                                .foregroundStyle(.orange)
+                            Text("No tile assigned. The agent calls assign_browser_tile to get a slot.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
+                // Actions
+                GroupBox("Actions") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Button {
+                            NSWorkspace.shared.open(
+                                URL(string: "http://localhost:47287/panel")!)
+                        } label: {
+                            Label("Open Browser Panel", systemImage: "arrow.up.right.square")
+                        }
+                        .help("Opens http://localhost:47287/panel — the standalone control panel showing all agent tiles")
+
+                        Text("Or paste http://localhost:47287/panel into any browser.")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                // How-to
+                GroupBox("How agents use the workspace") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("assign_browser_tile — opens a 4 000×4 000 WKWebView tile",
+                              systemImage: "1.circle.fill")
+                        Label("navigate_browser_tile — loads any URL in the tile",
+                              systemImage: "2.circle.fill")
+                        Label("capture_agent_screen — screenshots the tile for AI vision",
+                              systemImage: "3.circle.fill")
+                    }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+                }
+
+                Spacer()
+            }
+            .padding(24)
         }
     }
 }

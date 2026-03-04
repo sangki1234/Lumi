@@ -34,6 +34,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         Task { @MainActor in
             MacRemoteServer.shared.start()
+            BrowserWorkspaceServer.shared.start()
+            VirtualDisplayManager.shared.prepareCanvas()
         }
     }
 
@@ -71,7 +73,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         print("👋 LumiAgent shutting down")
-        Task { @MainActor in MacRemoteServer.shared.stop() }
+        Task { @MainActor in
+            MacRemoteServer.shared.stop()
+            BrowserWorkspaceServer.shared.stop()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
