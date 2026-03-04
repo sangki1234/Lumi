@@ -360,6 +360,79 @@ enum NetworkTools {
         }
         return output.isEmpty ? "No results found for: \(query) — add a Brave API key in Settings for better results." : output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    /// Reads the URL and visible text content of the active tab in the frontmost browser.
+    /// Supports Safari, Google Chrome, Firefox, Arc, Brave Browser, and Microsoft Edge.
+    static func readBrowserPage() async throws -> String {
+        let maxContentLength = 12000
+
+        // Ordered list of browsers to try, with their AppleScript dialects.
+        // Firefox does not expose a scriptable DOM, so only its URL is retrieved.
+        let browsers: [(name: String, script: String)] = [
+            ("Safari", """
+            tell application "Safari"
+                set theURL to URL of current tab of front window
+                set theTitle to name of current tab of front window
+                set theSource to do JavaScript "document.body ? document.body.innerText : ''" in current tab of front window
+                return theTitle & "\n" & theURL & "\n\n" & theSource
+            end tell
+            """),
+            ("Google Chrome", """
+            tell application "Google Chrome"
+                set theURL to URL of active tab of front window
+                set theTitle to title of active tab of front window
+                set theSource to execute active tab of front window javascript "document.body ? document.body.innerText : ''"
+                return theTitle & "\n" & theURL & "\n\n" & theSource
+            end tell
+            """),
+            ("Firefox", """
+            tell application "System Events"
+                tell process "Firefox"
+                    set theURL to value of text field 1 of tool bar 1 of front window
+                end tell
+            end tell
+            return theURL
+            """),
+            ("Arc", """
+            tell application "Arc"
+                set theURL to URL of active tab of front window
+                set theTitle to title of active tab of front window
+                set theSource to execute active tab of front window javascript "document.body ? document.body.innerText : ''"
+                return theTitle & "\n" & theURL & "\n\n" & theSource
+            end tell
+            """),
+            ("Brave Browser", """
+            tell application "Brave Browser"
+                set theURL to URL of active tab of front window
+                set theTitle to title of active tab of front window
+                set theSource to execute active tab of front window javascript "document.body ? document.body.innerText : ''"
+                return theTitle & "\n" & theURL & "\n\n" & theSource
+            end tell
+            """),
+            ("Microsoft Edge", """
+            tell application "Microsoft Edge"
+                set theURL to URL of active tab of front window
+                set theTitle to title of active tab of front window
+                set theSource to execute active tab of front window javascript "document.body ? document.body.innerText : ''"
+                return theTitle & "\n" & theURL & "\n\n" & theSource
+            end tell
+            """),
+        ]
+
+        // Try each browser until one succeeds (i.e., it is running and has a window open).
+        for browser in browsers {
+            let checkScript = "tell application \"System Events\" to return (name of processes) contains \"\(browser.name)\""
+            guard let checkResult = try? await ScreenControlTools.runAppleScript(script: checkScript),
+                  checkResult.lowercased().contains("true") else { continue }
+
+            if let result = try? await ScreenControlTools.runAppleScript(script: browser.script) {
+                let truncated = result.count > maxContentLength ? String(result.prefix(maxContentLength)) + "\n...[truncated]" : result
+                return truncated
+            }
+        }
+
+        throw ToolError.commandFailed("No supported browser is running. Open Safari, Chrome, Firefox, Arc, Brave, or Edge and navigate to a page first.")
+    }
 }
 
 // MARK: - Git Tools

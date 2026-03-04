@@ -490,6 +490,15 @@ final class ToolRegistry {
             }
         ))
 
+        register(RegisteredTool(
+            name: "read_browser_page",
+            description: "Read the title, URL, and visible text content of the active tab in the frontmost browser window. Supports Safari, Google Chrome, Firefox, Arc, Brave Browser, and Microsoft Edge.",
+            category: .webSearch,
+            riskLevel: .low,
+            parameters: AIToolParameters(properties: [:], required: []),
+            handler: { _ in try await NetworkTools.readBrowserPage() }
+        ))
+
         // MARK: Git
 
         register(RegisteredTool(
