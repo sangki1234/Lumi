@@ -858,14 +858,14 @@ final class ToolRegistry {
 
         register(RegisteredTool(
             name: "capture_agent_screen",
-            description: "Capture the virtual workspace screen assigned to a specific agent and save it as a JPEG. Use this to see what the agent is working on in its isolated browser workspace.",
+            description: "Capture the agent's 4 000×4 000 browser tile from the shared 20 000×20 000 virtual canvas and save it as a JPEG. Use this to see what the agent's browser is showing.",
             category: .screenshot,
             riskLevel: .low,
             parameters: AIToolParameters(
                 properties: [
                     "agentId": AIToolProperty(
                         type: "string",
-                        description: "The UUID of the agent whose workspace screen to capture"
+                        description: "UUID of the agent whose browser tile to capture"
                     ),
                     "path": AIToolProperty(
                         type: "string",
@@ -878,6 +878,58 @@ final class ToolRegistry {
                 try await MediaTools.captureAgentScreen(
                     agentIDString: args["agentId"] ?? "",
                     path: args["path"] ?? ""
+                )
+            }
+        ))
+
+        register(RegisteredTool(
+            name: "assign_browser_tile",
+            description: "Assign (or re-use) a 4 000×4 000 browser tile on the shared virtual canvas for an agent. Optionally load a starting URL. The Lumi browser panel at http://localhost:47287/panel shows all tiles.",
+            category: .screenshot,
+            riskLevel: .low,
+            parameters: AIToolParameters(
+                properties: [
+                    "agentId": AIToolProperty(
+                        type: "string",
+                        description: "UUID of the agent to assign a tile to"
+                    ),
+                    "url": AIToolProperty(
+                        type: "string",
+                        description: "Optional starting URL to load in the browser tile"
+                    )
+                ],
+                required: ["agentId"]
+            ),
+            handler: { args in
+                try await MediaTools.assignBrowserTile(
+                    agentIDString: args["agentId"] ?? "",
+                    url: args["url"]
+                )
+            }
+        ))
+
+        register(RegisteredTool(
+            name: "navigate_browser_tile",
+            description: "Navigate the agent's browser tile to a URL on the shared virtual canvas.",
+            category: .screenshot,
+            riskLevel: .low,
+            parameters: AIToolParameters(
+                properties: [
+                    "agentId": AIToolProperty(
+                        type: "string",
+                        description: "UUID of the agent whose browser tile to navigate"
+                    ),
+                    "url": AIToolProperty(
+                        type: "string",
+                        description: "URL to navigate to (e.g. https://example.com)"
+                    )
+                ],
+                required: ["agentId", "url"]
+            ),
+            handler: { args in
+                try await MediaTools.navigateBrowserTile(
+                    agentIDString: args["agentId"] ?? "",
+                    url: args["url"] ?? ""
                 )
             }
         ))

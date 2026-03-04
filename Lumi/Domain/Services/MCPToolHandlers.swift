@@ -679,7 +679,7 @@ enum MediaTools {
         }
     }
 
-    /// Capture the virtual workspace screen assigned to `agentID` as a JPEG.
+    /// Capture the agent's 4 000 × 4 000 browser tile as a JPEG.
     /// The captured image is written to `path` if provided, and the path is returned.
     static func captureAgentScreen(agentIDString: String, path: String) async throws -> String {
         guard let agentID = UUID(uuidString: agentIDString) else {
@@ -695,16 +695,42 @@ enum MediaTools {
         }
 
         guard let jpeg = await MainActor.run(body: {
-            VirtualDisplayManager.shared.captureWorkspace(for: agentID, maxWidth: 1440)
+            VirtualDisplayManager.shared.captureAgentTile(agentID: agentID, maxWidth: 1440)
         }) else {
             throw ToolError.commandFailed(
-                "No virtual workspace found for agent \(agentIDString). " +
-                "Enable 'Browser Workspace' for the agent first.")
+                "No browser tile found for agent \(agentIDString). " +
+                "Enable 'Browser Workspace' on the agent first, or call assign_browser_tile.")
         }
 
         let url = URL(fileURLWithPath: destination)
         try jpeg.write(to: url)
-        return "Agent workspace screenshot saved to \(destination)"
+        return "Agent tile screenshot saved to \(destination)"
+    }
+
+    /// Assign (or re-use) a browser tile for `agentID`, optionally navigating to a URL.
+    static func assignBrowserTile(agentIDString: String, url: String?) async throws -> String {
+        guard let agentID = UUID(uuidString: agentIDString) else {
+            throw ToolError.commandFailed("Invalid agentId '\(agentIDString)'")
+        }
+        guard let tile = await MainActor.run(body: {
+            VirtualDisplayManager.shared.assignTile(to: agentID, url: url)
+        }) else {
+            throw ToolError.commandFailed("All 25 tile slots are occupied. Release another agent's tile first.")
+        }
+        let urlInfo = tile.currentURL.map { " loaded with \($0)" } ?? ""
+        return "Tile slot \(tile.slot) at (\(Int(tile.tileOrigin.x)), \(Int(tile.tileOrigin.y))) assigned\(urlInfo). " +
+               "Open http://localhost:47287/panel in a browser to see the workspace."
+    }
+
+    /// Navigate the agent's browser tile to a URL.
+    static func navigateBrowserTile(agentIDString: String, url: String) async throws -> String {
+        guard let agentID = UUID(uuidString: agentIDString) else {
+            throw ToolError.commandFailed("Invalid agentId '\(agentIDString)'")
+        }
+        await MainActor.run {
+            VirtualDisplayManager.shared.navigate(agentID: agentID, to: url)
+        }
+        return "Navigated agent \(agentIDString.prefix(8)) tile to \(url)"
     }
 }
 

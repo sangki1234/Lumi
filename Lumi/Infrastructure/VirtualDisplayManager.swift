@@ -2,55 +2,50 @@
 //  VirtualDisplayManager.swift
 //  LumiAgent
 //
-//  Manages per-agent virtual displays so each browser-workspace agent operates
-//  on its own isolated, large off-screen canvas.
+//  Single shared 20 000 × 20 000 virtual canvas, tiled into 4 000 × 4 000
+//  agent slots.  Each agent's slot is backed by a WKWebView NSWindow placed
+//  at the tile's origin so the agent can browse, interact, and screenshot its
+//  own tile independently.
 //
-//  Strategy
-//  ────────
-//  macOS 12.4+ ships CGVirtualDisplay which genuinely registers a fake display
-//  with the WindowServer.  This requires the restricted
-//  `com.apple.developer.virtual-displays` entitlement, which most developer
-//  accounts don't hold.
+//  Canvas layout (tiles per row = 5, rows = 5, max 25 concurrent agents)
+//  ────────────────────────────────────────────────────────────────────────
+//  slot 0  : origin (    0,     0)   slot 1  : origin ( 4000,     0) …
+//  slot 5  : origin (    0,  4000)   slot 6  : origin ( 4000,  4000) …
+//  …
 //
-//  When that entitlement is absent (the typical case) we fall back to a large
-//  off-screen NSWindow ("workspace window") that acts as the agent's private
-//  canvas.  The native `screencapture -l <windowID>` tool can capture any
-//  on-screen window by ID, so the agent can still call `capture_agent_screen`
-//  and see whatever is rendered into that window.
+//  Virtual display strategy
+//  ────────────────────────
+//  macOS 12.4+ ships CGVirtualDisplay which genuinely registers a fake screen
+//  with the WindowServer — apps see it as a real monitor and windows can be
+//  moved there.  This needs the restricted
+//  `com.apple.developer.virtual-displays` entitlement.
 //
-//  On macOS 12.4+ WITH the virtual-display entitlement:
-//    • A CGVirtualDisplay (20 000 × 20 000 pt @ 1×) is created per agent.
-//    • The display is registered with the WindowServer; macOS Spaces and apps
-//      that enumerate NSScreen.screens will see it as a real monitor.
-//    • The display ID is stored and used when the agent calls screencapture.
-//
-//  Either way, the agent gets a `displayID` (real or pseudo) it can pass to
-//  `captureScreenAsJPEG(displayID:)`.
+//  When that entitlement is absent we fall back to placing browser windows at
+//  large off-screen coordinates that match the same tile grid geometry.
+//  screencapture -l <windowID> can capture any window regardless of where it
+//  is positioned on screen, so the agent capture path works in both modes.
 //
 
 #if os(macOS)
 import AppKit
 import CoreGraphics
 import Foundation
+import WebKit
 
-// MARK: - Virtual Display Descriptor
+// MARK: - Agent Tile
 
-/// Metadata about one agent's virtual display / workspace window.
-public struct AgentDisplay: Identifiable, Sendable {
-    public let id: UUID              // agent id
-    public let displayID: UInt32?    // CGDirectDisplayID if a real virtual display was created
-    public let windowID: CGWindowID? // backing NSWindow ID (fallback or always set)
-    public let size: CGSize          // logical points
-
-    public var label: String { "Agent \(id.uuidString.prefix(8))" }
-
-    /// Whether this is backed by a genuine CGVirtualDisplay.
-    public var isVirtualDisplay: Bool { displayID != nil }
+/// All the information about one agent's 4 000 × 4 000 tile on the canvas.
+public struct AgentTile: Identifiable, Sendable {
+    public let id: UUID           // agent ID
+    public let slot: Int          // 0-based grid slot
+    public let tileOrigin: CGPoint // origin within the 20 000 × 20 000 canvas
+    public let windowID: CGWindowID
+    public var currentURL: String?
 }
 
 // MARK: - Virtual Display Manager
 
-/// Singleton that creates and tears down per-agent virtual workspaces.
+/// Singleton that owns the shared virtual canvas and all per-agent browser tiles.
 @MainActor
 public final class VirtualDisplayManager: ObservableObject {
 
@@ -58,95 +53,129 @@ public final class VirtualDisplayManager: ObservableObject {
 
     public static let shared = VirtualDisplayManager()
 
-    // MARK: - Constants
+    // MARK: - Canvas constants
 
-    /// Logical size of each workspace canvas.
-    /// 20 000 × 20 000 pt mirrors the requirement; the actual pixel count
-    /// depends on the backing scale factor.
-    public static let workspaceSize = CGSize(width: 20_000, height: 20_000)
+    /// Total size of the shared virtual canvas.
+    public static let canvasSize  = CGSize(width: 20_000, height: 20_000)
+    /// Size of each agent's browser tile.
+    public static let tileSize    = CGSize(width: 4_000,  height: 4_000)
+    /// Number of tiles in each row (canvasSize.width / tileSize.width).
+    public static let tilesPerRow = 5
 
-    // MARK: - Published State
+    // MARK: - Published state
 
-    @Published public private(set) var agentDisplays: [UUID: AgentDisplay] = [:]
+    @Published public private(set) var tiles: [UUID: AgentTile] = [:]
+    @Published public private(set) var virtualDisplayID: UInt32? = nil
 
     // MARK: - Private
 
-    /// NSWindows used as fallback workspace canvases, keyed by agent ID.
-    private var workspaceWindows: [UUID: NSWindow] = [:]
+    /// The single large NSWindow that represents the canvas when CGVirtualDisplay
+    /// is unavailable (kept alive so screencapture can find it).
+    private var canvasWindow: NSWindow?
+    /// Backing browser windows, keyed by agent ID.
+    /// Strong references are intentional: VirtualDisplayManager owns these windows;
+    /// they are explicitly closed and removed in releaseTile(for:).
+    private var browserWindows: [UUID: NSWindow] = [:]
+    /// Slot occupancy: slot index → agent ID.
+    private var occupiedSlots: [Int: UUID] = [:]
+    /// Held reference to the CGVirtualDisplay object (ARC keeps it alive).
+    private var virtualDisplayObject: AnyObject?
 
     private init() {}
 
-    // MARK: - Public API
+    // MARK: - Canvas bootstrap
 
-    /// Create (or return the existing) virtual workspace for `agentID`.
-    /// Returns the `AgentDisplay` descriptor on success.
+    /// Ensures the shared virtual canvas exists.  Must be called once at startup.
+    public func prepareCanvas() {
+        guard canvasWindow == nil && virtualDisplayID == nil else { return }
+
+        if let id = tryCreateCGVirtualDisplay() {
+            virtualDisplayID = id
+            print("[VirtualDisplayManager] Virtual display \(id) active (\(Self.canvasSize.width)×\(Self.canvasSize.height))")
+        } else {
+            createFallbackCanvasWindow()
+        }
+    }
+
+    // MARK: - Tile management
+
+    /// Assign the next free tile to `agentID` (or return the existing tile).
+    /// Opens a 4 000 × 4 000 WKWebView window at the tile origin.
+    /// - Parameter url: Optional starting URL to load in the browser tile.
     @discardableResult
-    public func createWorkspace(for agentID: UUID) -> AgentDisplay {
-        if let existing = agentDisplays[agentID] { return existing }
+    public func assignTile(to agentID: UUID, url: String? = nil) -> AgentTile? {
+        if let existing = tiles[agentID] { return existing }
 
-        // Try CGVirtualDisplay first (macOS 12.4+, restricted entitlement).
-        if let display = tryCreateCGVirtualDisplay(for: agentID) {
-            agentDisplays[agentID] = display
-            return display
+        guard let slot = nextFreeSlot() else {
+            print("[VirtualDisplayManager] All \(Self.tilesPerRow * Self.tilesPerRow) slots occupied")
+            return nil
         }
 
-        // Fallback: off-screen NSWindow.
-        let display = createWorkspaceWindow(for: agentID)
-        agentDisplays[agentID] = display
-        return display
+        let origin = tileOrigin(for: slot)
+        let window = createBrowserWindow(at: origin, agentID: agentID, url: url)
+        let wid = CGWindowID(window.windowNumber)
+
+        let tile = AgentTile(
+            id: agentID,
+            slot: slot,
+            tileOrigin: origin,
+            windowID: wid,
+            currentURL: url
+        )
+        tiles[agentID] = tile
+        occupiedSlots[slot] = agentID
+        browserWindows[agentID] = window
+        print("[VirtualDisplayManager] Agent \(agentID) → slot \(slot) origin \(origin) window \(wid)")
+        return tile
     }
 
-    /// Destroy the virtual workspace for `agentID`, releasing system resources.
-    public func destroyWorkspace(for agentID: UUID) {
-        workspaceWindows[agentID]?.close()
-        workspaceWindows.removeValue(forKey: agentID)
-        agentDisplays.removeValue(forKey: agentID)
-        // CGVirtualDisplay objects are released via ARC when we remove the
-        // reference below — see `virtualDisplayObjects`.
-        virtualDisplayObjects.removeValue(forKey: agentID)
-    }
-
-    /// Capture the workspace for `agentID` as JPEG data, suitable for AI vision.
-    public func captureWorkspace(for agentID: UUID, maxWidth: CGFloat = 1440) -> Data? {
-        guard let info = agentDisplays[agentID] else { return nil }
-
-        if let displayID = info.displayID {
-            // Real virtual display: use the existing per-display capture.
-            return captureScreenAsJPEG(maxWidth: maxWidth, displayID: displayID)
+    /// Navigate the agent's browser tile to a new URL.
+    public func navigate(agentID: UUID, to urlString: String) {
+        guard let url = URL(string: urlString),
+              let window = browserWindows[agentID],
+              let webView = window.contentView as? WKWebView else { return }
+        webView.load(URLRequest(url: url))
+        // Struct value type: extract, mutate, reassign.
+        if var tile = tiles[agentID] {
+            tile.currentURL = urlString
+            tiles[agentID] = tile
         }
-
-        if let windowID = info.windowID {
-            return captureWindow(id: windowID, maxWidth: maxWidth)
-        }
-
-        return nil
     }
 
-    // MARK: - CGVirtualDisplay (macOS 12.4+)
+    /// Release an agent's tile, closing its browser window.
+    public func releaseTile(for agentID: UUID) {
+        if let tile = tiles[agentID] {
+            occupiedSlots.removeValue(forKey: tile.slot)
+        }
+        browserWindows[agentID]?.close()
+        browserWindows.removeValue(forKey: agentID)
+        tiles.removeValue(forKey: agentID)
+    }
 
-    /// Opaque holder for the CGVirtualDisplay object (kept alive via ARC).
-    private var virtualDisplayObjects: [UUID: AnyObject] = [:]
+    // MARK: - Capture
 
-    private func tryCreateCGVirtualDisplay(for agentID: UUID) -> AgentDisplay? {
-        // CGVirtualDisplay was added in macOS 12.4 / CoreGraphics framework.
-        // We call it dynamically so the binary still loads on older systems.
+    /// Capture the agent's 4 000 × 4 000 browser window as JPEG data.
+    /// `maxWidth` controls the output resolution; defaults to 1 440 px wide.
+    public func captureAgentTile(agentID: UUID, maxWidth: CGFloat = 1440) -> Data? {
+        guard let tile = tiles[agentID] else { return nil }
+        return captureWindow(id: tile.windowID, maxWidth: maxWidth)
+    }
+
+    // MARK: - Private: CGVirtualDisplay
+
+    private func tryCreateCGVirtualDisplay() -> UInt32? {
         guard #available(macOS 12.4, *) else { return nil }
 
-        // CGVirtualDisplayCreate() requires the
-        // com.apple.developer.virtual-displays entitlement.
-        // A SIGTRAP / kCGErrorNotPermitted will be thrown when the entitlement
-        // is absent.  We catch that by checking the descriptor API availability
-        // and swallowing the resulting nil.
         guard let descriptor = CGVirtualDisplayDescriptor() else { return nil }
-        descriptor.name = "Lumi Agent Workspace"
-        descriptor.sizeInMillimeters = CGSize(width: 520, height: 520)
+        descriptor.name = "Lumi Canvas"
+        descriptor.sizeInMillimeters = CGSize(width: 527, height: 527)
         descriptor.queue = DispatchQueue.main
         descriptor.resizeSensorCallback = nil
 
         let settings = CGVirtualDisplaySettings()
         let mode = CGVirtualDisplayMode(
-            width: UInt32(Self.workspaceSize.width),
-            height: UInt32(Self.workspaceSize.height),
+            width: UInt32(Self.canvasSize.width),
+            height: UInt32(Self.canvasSize.height),
             refreshRate: 30
         )
         settings.hiDPI = false
@@ -154,68 +183,109 @@ public final class VirtualDisplayManager: ObservableObject {
 
         guard let vd = CGVirtualDisplay(descriptor: descriptor) else { return nil }
         guard vd.apply(settings) == .success else { return nil }
+        let id = vd.displayID
+        guard id != kCGNullDirectDisplay else { return nil }
 
-        // Obtain the real CGDirectDisplayID.
-        let displayID = vd.displayID
-        guard displayID != kCGNullDirectDisplay else { return nil }
-
-        // Keep the object alive.
-        virtualDisplayObjects[agentID] = vd
-
-        let display = AgentDisplay(
-            id: agentID,
-            displayID: displayID,
-            windowID: nil,
-            size: Self.workspaceSize
-        )
-        print("[VirtualDisplayManager] Created CGVirtualDisplay \(displayID) for agent \(agentID)")
-        return display
+        virtualDisplayObject = vd
+        return id
     }
 
-    // MARK: - Fallback: off-screen NSWindow
+    // MARK: - Private: fallback canvas NSWindow
 
-    private func createWorkspaceWindow(for agentID: UUID) -> AgentDisplay {
-        let size = Self.workspaceSize
-        // Place the window far off-screen so it isn't visible to the user
-        // but remains "on-screen" in Window Server terms so screencapture -l works.
-        let offscreenOrigin = CGPoint(
-            x: CGFloat(50_000) + CGFloat(agentDisplays.count) * 100,
-            y: CGFloat(50_000)
+    private func createFallbackCanvasWindow() {
+        // A large borderless window placed far off-screen.  It acts as the
+        // conceptual origin of the tile grid; browser windows are placed relative
+        // to its top-left corner.
+        let origin = CGPoint(x: canvasOffscreenOffset, y: canvasOffscreenOffset)
+        let frame = CGRect(origin: origin, size: Self.canvasSize)
+        let w = NSWindow(
+            contentRect: frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
         )
-        let frame = CGRect(origin: offscreenOrigin, size: size)
+        w.title = "Lumi Virtual Canvas"
+        w.backgroundColor = NSColor(white: 0.06, alpha: 1)
+        w.isOpaque = true
+        w.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)))
+        w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        w.orderFront(nil)
+        canvasWindow = w
+        print("[VirtualDisplayManager] Fallback canvas window at \(origin)")
+    }
 
+    // MARK: - Private: browser tile window
+
+    private func createBrowserWindow(at tileOriginOnCanvas: CGPoint,
+                                     agentID: UUID,
+                                     url: String?) -> NSWindow {
+        // Absolute screen position: if we have a real virtual display, the tile
+        // origin IS the screen coordinate on that display.  For the fallback we
+        // offset by the canvas window's origin.
+        let screenOrigin: CGPoint
+        if virtualDisplayID != nil {
+            screenOrigin = tileOriginOnCanvas
+        } else {
+            let canvasOrigin = CGPoint(x: canvasOffscreenOffset, y: canvasOffscreenOffset)
+            screenOrigin = CGPoint(
+                x: canvasOrigin.x + tileOriginOnCanvas.x,
+                y: canvasOrigin.y + tileOriginOnCanvas.y
+            )
+        }
+
+        let frame = CGRect(origin: screenOrigin, size: Self.tileSize)
         let window = NSWindow(
             contentRect: frame,
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
-        window.title = "Lumi Virtual Workspace — \(agentID.uuidString.prefix(8))"
-        window.backgroundColor = .black
+        window.title = "Lumi Browser — \(agentID.uuidString.prefix(8))"
         window.isOpaque = true
-        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)) + 1)
+        window.backgroundColor = .white
+        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.normalWindow)))
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        // Make the window visible so screencapture can capture it.
+
+        // Embed a WKWebView as the full content.
+        let webView = WKWebView(frame: CGRect(origin: .zero, size: Self.tileSize))
+        webView.autoresizingMask = [.width, .height]
+        if let urlString = url, let targetURL = URL(string: urlString) {
+            webView.load(URLRequest(url: targetURL))
+        } else {
+            webView.loadHTMLString(Self.tileDefaultHTML(agentID: agentID), baseURL: nil)
+        }
+        window.contentView = webView
         window.orderFront(nil)
-
-        let windowID = CGWindowID(window.windowNumber)
-        workspaceWindows[agentID] = window
-
-        let display = AgentDisplay(
-            id: agentID,
-            displayID: nil,
-            windowID: windowID,
-            size: size
-        )
-        print("[VirtualDisplayManager] Created workspace window \(windowID) for agent \(agentID)")
-        return display
+        return window
     }
 
-    // MARK: - Window capture helper
+    // MARK: - Private: tile geometry
+
+    /// Returns the tile origin (within the 20 000 × 20 000 canvas) for `slot`.
+    private func tileOrigin(for slot: Int) -> CGPoint {
+        let col = slot % Self.tilesPerRow
+        let row = slot / Self.tilesPerRow
+        return CGPoint(
+            x: CGFloat(col) * Self.tileSize.width,
+            y: CGFloat(row) * Self.tileSize.height
+        )
+    }
+
+    /// Returns the next unoccupied slot index, or nil if all 25 are taken.
+    private func nextFreeSlot() -> Int? {
+        let maxSlots = Self.tilesPerRow * Self.tilesPerRow
+        return (0 ..< maxSlots).first { occupiedSlots[$0] == nil }
+    }
+
+    /// Off-screen coordinate used as the canvas origin in fallback mode.
+    /// Large enough that no physical display will ever reach it.
+    private var canvasOffscreenOffset: CGFloat { 50_000 }
+
+    // MARK: - Private: window capture
 
     private func captureWindow(id windowID: CGWindowID, maxWidth: CGFloat) -> Data? {
         let tmpURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lumi_ws_\(UUID().uuidString).png")
+            .appendingPathComponent("lumi_tile_\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: tmpURL) }
 
         let proc = Process()
@@ -245,6 +315,32 @@ public final class VirtualDisplayManager: ObservableObject {
 
         return NSBitmapImageRep(cgImage: scaled)
             .representation(using: .jpeg, properties: [.compressionFactor: 0.82])
+    }
+
+    // MARK: - Default tile HTML
+
+    private static func tileDefaultHTML(agentID: UUID) -> String {
+        """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <style>
+          body { margin:0; background:#0d0d0d; color:#e0e0e0;
+                 font-family:-apple-system,sans-serif;
+                 display:flex; align-items:center; justify-content:center;
+                 height:100vh; flex-direction:column; gap:12px; }
+          .label { font-size:22px; font-weight:600; }
+          .sub   { font-size:14px; color:#666; }
+        </style>
+        </head>
+        <body>
+          <div class="label">Lumi Agent Tile</div>
+          <div class="sub">\(agentID.uuidString.prefix(8))</div>
+          <div class="sub">Navigate to a URL to begin</div>
+        </body>
+        </html>
+        """
     }
 }
 

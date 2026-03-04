@@ -35,6 +35,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             MacRemoteServer.shared.start()
             BrowserWorkspaceServer.shared.start()
+            VirtualDisplayManager.shared.prepareCanvas()
         }
     }
 

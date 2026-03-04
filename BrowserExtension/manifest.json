@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Lumi Browser Workspace",
+  "version": "1.0.0",
+  "description": "Open the Lumi agent browser workspace panel. Each agent works in its own 4 000×4 000 tile on a shared 20 000×20 000 virtual canvas.",
+  "minimum_chrome_version": "88",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Open Lumi Browser Workspace",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["tabs"],
+  "host_permissions": ["http://localhost:47287/*"]
+}

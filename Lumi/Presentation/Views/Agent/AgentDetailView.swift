@@ -419,6 +419,18 @@ private struct EditForm: View {
                 }
                 .padding(.vertical, 8)
             }
+
+            // Browser Workspace
+            GroupBox("Browser Workspace") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle("Enable Browser Workspace", isOn: $draft.configuration.browserWorkspaceEnabled)
+                    Text("The agent gets a 4 000×4 000 tile on the shared 20 000×20 000 virtual canvas. Use the assign_browser_tile, navigate_browser_tile, and capture_agent_screen tools. Open http://localhost:47287/panel in any browser to see all tiles.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.vertical, 8)
+            }
         }
     }
 
