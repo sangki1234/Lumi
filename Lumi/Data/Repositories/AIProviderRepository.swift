@@ -51,6 +51,16 @@ final class AIProviderRepository: AIProviderRepositoryProtocol {
                 maxTokens: maxTokens,
                 provider: .qwen
             )
+        case .glm:
+            return try await sendOpenAIMessage(
+                model: model,
+                messages: messages,
+                systemPrompt: systemPrompt,
+                tools: tools,
+                temperature: temperature,
+                maxTokens: maxTokens,
+                provider: .glm
+            )
         case .anthropic:
             return try await sendAnthropicMessage(model: model, messages: messages,
                 systemPrompt: systemPrompt, tools: tools, temperature: temperature, maxTokens: maxTokens)
@@ -87,6 +97,15 @@ final class AIProviderRepository: AIProviderRepositoryProtocol {
                 maxTokens: maxTokens,
                 provider: .qwen
             )
+        case .glm:
+            return try await sendOpenAIStream(
+                model: model,
+                messages: messages,
+                systemPrompt: systemPrompt,
+                temperature: temperature,
+                maxTokens: maxTokens,
+                provider: .glm
+            )
         case .anthropic:
             return try await sendAnthropicStream(model: model, messages: messages,
                 systemPrompt: systemPrompt, temperature: temperature, maxTokens: maxTokens)
@@ -105,6 +124,7 @@ final class AIProviderRepository: AIProviderRepositoryProtocol {
         switch provider {
         case .openai:    return provider.defaultModels
         case .qwen:      return provider.defaultModels
+        case .glm:       return provider.defaultModels
         case .anthropic: return provider.defaultModels
         case .gemini:    return provider.defaultModels
         case .ollama:    return try await fetchOllamaModels()
@@ -484,6 +504,9 @@ final class AIProviderRepository: AIProviderRepositoryProtocol {
         case .qwen:
             apiProvider = .qwen
             endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+        case .glm:
+            apiProvider = .glm
+            endpoint = "https://api.z.ai/api/coding/paas/v4/chat/completions"
         default:
             throw AIProviderError.providerError("Unsupported OpenAI-compatible provider: \(provider.rawValue)")
         }
@@ -522,6 +545,8 @@ final class AIProviderRepository: AIProviderRepositoryProtocol {
             return "OpenAI"
         case .qwen:
             return "Aliyun Qwen"
+        case .glm:
+            return "Z.AI GLM"
         default:
             return provider.rawValue
         }
@@ -812,7 +837,21 @@ final class AIProviderRepository: AIProviderRepositoryProtocol {
     ) async throws -> AIResponse {
         let req = try ollamaRequest(model: model, messages: messages,
             systemPrompt: systemPrompt, tools: tools, temperature: temperature, stream: false)
-        let (data, response) = try await URLSession.shared.data(for: req)
+        var (data, response) = try await URLSession.shared.data(for: req)
+
+        // If tools were sent but the model doesn't support them, retry without tools.
+        // Ollama returns HTTP 400 with an error message containing "tool" in that case.
+        if !tools.isEmpty,
+           let http = response as? HTTPURLResponse, http.statusCode == 400 {
+            let errorBody = String(data: data, encoding: .utf8) ?? ""
+            if errorBody.localizedCaseInsensitiveContains("tool") {
+                let retryReq = try ollamaRequest(model: model, messages: messages,
+                    systemPrompt: systemPrompt, tools: [], temperature: temperature, stream: false)
+                let (retryData, retryResponse) = try await URLSession.shared.data(for: retryReq)
+                data = retryData
+                response = retryResponse
+            }
+        }
 
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             let body = String(data: data, encoding: .utf8) ?? ""

@@ -105,6 +105,7 @@ enum AIProvider: String, Codable, CaseIterable {
     case anthropic = "Anthropic"
     case gemini = "Gemini"
     case qwen = "Aliyun Qwen"
+    case glm = "Z.AI GLM"
     case ollama = "Ollama"
 
     var recommendedModels: [String] {
@@ -133,10 +134,19 @@ enum AIProvider: String, Codable, CaseIterable {
                 "qwen-flash",
                 "qwen3-max"
             ]
+        case .glm:
+            return [
+                "glm-4.5",
+                "glm-4.5-air",
+                "glm-4.7"
+            ]
         case .ollama:
             return [
                 "qwen2.5:7b",
                 "llama3.2:3b",
+                "llama3.1:8b",
+                "mistral:7b",
+                "qwen3:8b",
                 "deepseek-r1:8b"
             ]
         }
@@ -199,6 +209,21 @@ enum AIProvider: String, Codable, CaseIterable {
                 "qwen3-max-preview",
                 "qwen3-coder-plus",
                 "qwen3-coder-flash"
+            ]
+        case .glm:
+            return [
+                "glm-4.5",
+                "glm-4.5-air",
+                "glm-4.5-airx",
+                "glm-4.5-flash",
+                "glm-4.5-x",
+                "glm-4.7",
+                "glm-4-plus",
+                "glm-4-air",
+                "glm-4",
+                "glm-z1-plus",
+                "glm-z1-air",
+                "glm-z1-flash"
             ]
         case .ollama:
             return []
