@@ -398,6 +398,81 @@ final class AIProviderRepository: AIProviderRepositoryProtocol {
     }
 
     // =========================================================================
+    // MARK: - Reasoning / Tool-call Content Helpers
+    // =========================================================================
+
+    /// Strips <think>…</think>, <thinking>…</thinking>, and <thought>…</thought>
+    /// blocks that reasoning models emit (DeepSeek-R1, GLM-Z1, Qwen3, gpt-oss, etc.).
+    /// Returns nil when only thinking content was present (no visible reply).
+    private func stripThinkingTags(_ text: String?) -> String? {
+        guard var t = text, !t.isEmpty else { return text }
+        let tags = ["think", "thinking", "thought"]
+        for tag in tags {
+            // [\\s\\S]*? matches any character including newlines, so .dotMatchesLineSeparators is not needed.
+            let pattern = "<\(tag)>[\\s\\S]*?</\(tag)>"
+            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+                t = regex.stringByReplacingMatches(
+                    in: t,
+                    range: NSRange(t.startIndex..., in: t),
+                    withTemplate: ""
+                )
+            }
+        }
+        t = t.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
+
+    /// Returns false for function names that contain pipe, angle-bracket, or
+    /// whitespace characters — these indicate a malformed tool call produced by
+    /// gpt-oss or certain GLM variants (e.g. "assistant<|channel|>analysis").
+    private func isValidFunctionName(_ name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        let invalid = CharacterSet(charactersIn: "|<>").union(.whitespaces)
+        return name.unicodeScalars.allSatisfy { !invalid.contains($0) }
+    }
+
+    /// Fallback for models that embed tool calls as
+    /// <tool_call>{"name":"…","arguments":{…}}</tool_call> inside the content
+    /// string instead of (or in addition to) the structured tool_calls field.
+    /// Returns the cleaned content (tool_call blocks removed) and extracted ToolCalls.
+    private func extractXMLToolCalls(from content: String) -> (cleanContent: String?, toolCalls: [ToolCall]) {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"<tool_call>([\s\S]*?)</tool_call>"#,
+            options: .caseInsensitive
+        ) else { return (content, []) }
+
+        let fullRange = NSRange(content.startIndex..., in: content)
+        let matches = regex.matches(in: content, range: fullRange)
+        guard !matches.isEmpty else { return (content, []) }
+
+        // Collect tool calls in forward order.
+        var toolCalls: [ToolCall] = []
+        for match in matches {
+            guard let bodyRange = Range(match.range(at: 1), in: content),
+                  let data = String(content[bodyRange]).data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let name = json["name"] as? String, isValidFunctionName(name) else { continue }
+            let args: [String: String]
+            if let d = json["arguments"] as? [String: Any] {
+                args = toArgStrings(d)
+            } else if let s = json["arguments"] as? String {
+                args = decodeArgs(s)
+            } else {
+                args = [:]
+            }
+            // XML format carries no call ID, so we generate one here.
+            toolCalls.append(ToolCall(id: UUID().uuidString, name: name, arguments: args))
+        }
+
+        guard !toolCalls.isEmpty else { return (content, []) }
+
+        // Remove all matched blocks in a single pass.
+        let cleaned = regex.stringByReplacingMatches(in: content, range: fullRange, withTemplate: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (cleaned.isEmpty ? nil : cleaned, toolCalls)
+    }
+
+    // =========================================================================
     // MARK: - OpenAI
     // =========================================================================
 
@@ -418,7 +493,16 @@ final class AIProviderRepository: AIProviderRepositoryProtocol {
               let message = first["message"] as? [String: Any]
         else { throw AIProviderError.invalidResponse }
 
-        let content = message["content"] as? String
+        let rawContent = message["content"] as? String
+
+        // Strip thinking-mode tags emitted by GLM-Z1/GLM-4.5 and Qwen3 models.
+        let content: String?
+        switch provider {
+        case .glm, .qwen:
+            content = stripThinkingTags(rawContent)
+        default:
+            content = rawContent
+        }
 
         // Parse tool calls from response
         var toolCalls: [ToolCall]? = nil
@@ -427,9 +511,18 @@ final class AIProviderRepository: AIProviderRepositoryProtocol {
                 guard let id  = tc["id"] as? String,
                       let fn  = tc["function"] as? [String: Any],
                       let nm  = fn["name"] as? String,
-                      let ars = fn["arguments"] as? String
+                      isValidFunctionName(nm)
                 else { return nil }
-                return ToolCall(id: id, name: nm, arguments: decodeArgs(ars))
+                // arguments is a JSON string in the OpenAI spec; tolerate pre-decoded dicts too
+                let ars: [String: String]
+                if let s = fn["arguments"] as? String {
+                    ars = decodeArgs(s)
+                } else if let d = fn["arguments"] as? [String: Any] {
+                    ars = toArgStrings(d)
+                } else {
+                    ars = [:]
+                }
+                return ToolCall(id: id, name: nm, arguments: ars)
             }
             toolCalls = parsed.isEmpty ? nil : parsed
         }
@@ -470,7 +563,15 @@ final class AIProviderRepository: AIProviderRepositoryProtocol {
                         else { continue }
 
                         let delta = first["delta"] as? [String: Any]
-                        let content = delta?["content"] as? String
+                        let rawContent = delta?["content"] as? String
+                        // Strip thinking-mode blocks for GLM and Qwen streaming responses
+                        let content: String?
+                        switch provider {
+                        case .glm, .qwen:
+                            content = stripThinkingTags(rawContent)
+                        default:
+                            content = rawContent
+                        }
                         let finishReason = first["finish_reason"] as? String
 
                         if content != nil || finishReason != nil {
@@ -862,14 +963,18 @@ final class AIProviderRepository: AIProviderRepositoryProtocol {
               let message = json["message"] as? [String: Any]
         else { throw AIProviderError.invalidResponse }
 
-        let content = message["content"] as? String
+        // Strip <think>/<thinking>/<thought> blocks emitted by reasoning models
+        // (DeepSeek-R1, GLM-4.7-Flash, Qwen3, gpt-oss, etc.).
+        var content = stripThinkingTags(message["content"] as? String)
 
-        // Parse tool calls (Ollama uses OpenAI-compatible format)
+        // Parse tool calls. Ollama uses OpenAI-compatible format; arguments may
+        // arrive as a JSON string OR as an already-decoded object (model-dependent).
         var toolCalls: [ToolCall]? = nil
         if let raw = message["tool_calls"] as? [[String: Any]] {
             let parsed = raw.compactMap { tc -> ToolCall? in
                 guard let fn   = tc["function"] as? [String: Any],
-                      let name = fn["name"] as? String
+                      let name = fn["name"] as? String,
+                      isValidFunctionName(name)    // reject malformed gpt-oss calls
                 else { return nil }
                 let id = tc["id"] as? String ?? UUID().uuidString
                 let args: [String: String]
@@ -885,9 +990,20 @@ final class AIProviderRepository: AIProviderRepositoryProtocol {
             toolCalls = parsed.isEmpty ? nil : parsed
         }
 
+        // Fallback: extract <tool_call>{…}</tool_call> XML blocks from content.
+        // gpt-oss and some GLM variants embed tool calls in plain text when the
+        // structured tool_calls field is absent.
+        if toolCalls == nil, let c = content, !c.isEmpty {
+            let (cleanContent, xmlCalls) = extractXMLToolCalls(from: c)
+            if !xmlCalls.isEmpty {
+                content = cleanContent
+                toolCalls = xmlCalls
+            }
+        }
+
         return AIResponse(
             id: UUID().uuidString,
-            content: content?.isEmpty == false ? content : nil,
+            content: content,
             toolCalls: toolCalls,
             finishReason: json["done_reason"] as? String ?? "stop",
             usage: ollamaUsage(json)
@@ -919,7 +1035,9 @@ final class AIProviderRepository: AIProviderRepositoryProtocol {
                         else { continue }
 
                         let done = json["done"] as? Bool ?? false
-                        let content = (json["message"] as? [String: Any])?["content"] as? String
+                        // Strip thinking-mode blocks from streaming chunks too
+                        let rawChunk = (json["message"] as? [String: Any])?["content"] as? String
+                        let content = stripThinkingTags(rawChunk)
 
                         continuation.yield(AIStreamChunk(
                             id: UUID().uuidString, content: content, toolCallChunk: nil,

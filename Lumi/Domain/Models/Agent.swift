@@ -142,8 +142,9 @@ enum AIProvider: String, Codable, CaseIterable {
             ]
         case .ollama:
             return [
+                "glm-4.7-flash:latest",
+                "gpt-oss:20b",
                 "qwen2.5:7b",
-                "llama3.2:3b",
                 "llama3.1:8b",
                 "mistral:7b",
                 "qwen3:8b",
