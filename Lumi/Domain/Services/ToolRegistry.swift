@@ -858,7 +858,7 @@ final class ToolRegistry {
 
         register(RegisteredTool(
             name: "capture_agent_screen",
-            description: "Capture the agent's 4 000×4 000 browser tile from the shared 20 000×20 000 virtual canvas and save it as a JPEG. Use this to see what the agent's browser is showing.",
+            description: "Capture the agent's browser tile from the shared virtual canvas and save it as a JPEG. Use this to see what the agent's browser is showing.",
             category: .screenshot,
             riskLevel: .low,
             parameters: AIToolParameters(
@@ -884,7 +884,7 @@ final class ToolRegistry {
 
         register(RegisteredTool(
             name: "assign_browser_tile",
-            description: "Assign (or re-use) a 4 000×4 000 browser tile on the shared virtual canvas for an agent. Optionally load a starting URL. The Lumi browser panel at http://localhost:47287/panel shows all tiles.",
+            description: "Assign (or re-use) a browser tile on the shared virtual canvas for an agent. Optionally load a starting URL. The Lumi browser panel at http://localhost:47287/panel shows all tiles.",
             category: .screenshot,
             riskLevel: .low,
             parameters: AIToolParameters(
@@ -930,6 +930,234 @@ final class ToolRegistry {
                 try await MediaTools.navigateBrowserTile(
                     agentIDString: args["agentId"] ?? "",
                     url: args["url"] ?? ""
+                )
+            }
+        ))
+
+        register(RegisteredTool(
+            name: "get_browser_tile_state",
+            description: "Get detailed state for one browser workspace tile: slot, URL, title, and back/forward availability.",
+            category: .screenshot,
+            riskLevel: .low,
+            parameters: AIToolParameters(
+                properties: [
+                    "agentId": AIToolProperty(
+                        type: "string",
+                        description: "UUID of the agent whose tile state to read"
+                    )
+                ],
+                required: ["agentId"]
+            ),
+            handler: { args in
+                try await MediaTools.getBrowserTileState(
+                    agentIDString: args["agentId"] ?? ""
+                )
+            }
+        ))
+
+        register(RegisteredTool(
+            name: "list_browser_tiles",
+            description: "List all currently assigned browser workspace tiles with agent IDs, slots, and URLs.",
+            category: .screenshot,
+            riskLevel: .low,
+            parameters: AIToolParameters(
+                properties: [:],
+                required: []
+            ),
+            handler: { _ in
+                try await MediaTools.listBrowserTiles()
+            }
+        ))
+
+        register(RegisteredTool(
+            name: "read_browser_tile_page",
+            description: "Read the current page in a browser tile (title, URL, visible text) directly from the embedded workspace browser.",
+            category: .screenshot,
+            riskLevel: .low,
+            parameters: AIToolParameters(
+                properties: [
+                    "agentId": AIToolProperty(
+                        type: "string",
+                        description: "UUID of the agent whose browser tile to read"
+                    ),
+                    "max_chars": AIToolProperty(
+                        type: "string",
+                        description: "Maximum visible-text characters to return (optional, default 12000)"
+                    )
+                ],
+                required: ["agentId"]
+            ),
+            handler: { args in
+                let maxChars = Int(args["max_chars"] ?? "12000") ?? 12000
+                return try await MediaTools.readBrowserTilePage(
+                    agentIDString: args["agentId"] ?? "",
+                    maxChars: maxChars
+                )
+            }
+        ))
+
+        register(RegisteredTool(
+            name: "browser_tile_click",
+            description: "Use a virtual mouse click inside the browser tile at viewport coordinates (x, y). Useful for buttons, links, tabs, and canvas-like boards.",
+            category: .screenshot,
+            riskLevel: .low,
+            parameters: AIToolParameters(
+                properties: [
+                    "agentId": AIToolProperty(type: "string", description: "UUID of the agent whose browser tile to click"),
+                    "x": AIToolProperty(type: "string", description: "X coordinate in tile viewport pixels"),
+                    "y": AIToolProperty(type: "string", description: "Y coordinate in tile viewport pixels"),
+                    "button": AIToolProperty(type: "string", description: "Mouse button", enumValues: ["left", "right", "middle"]),
+                    "clicks": AIToolProperty(type: "string", description: "Click count (default 1)")
+                ],
+                required: ["agentId", "x", "y"]
+            ),
+            handler: { args in
+                let x = Int(args["x"] ?? "") ?? 0
+                let y = Int(args["y"] ?? "") ?? 0
+                let button = args["button"] ?? "left"
+                let clicks = Int(args["clicks"] ?? "1") ?? 1
+                return try await MediaTools.browserTileClick(
+                    agentIDString: args["agentId"] ?? "",
+                    x: x,
+                    y: y,
+                    button: button,
+                    clicks: clicks
+                )
+            }
+        ))
+
+        register(RegisteredTool(
+            name: "browser_tile_type",
+            description: "Type text into the active input/editor inside the browser tile. Can optionally replace existing text and submit.",
+            category: .screenshot,
+            riskLevel: .low,
+            parameters: AIToolParameters(
+                properties: [
+                    "agentId": AIToolProperty(type: "string", description: "UUID of the agent whose browser tile to type in"),
+                    "text": AIToolProperty(type: "string", description: "Text to type"),
+                    "submit": AIToolProperty(type: "string", description: "Set true to submit after typing", enumValues: ["true", "false"]),
+                    "replace": AIToolProperty(type: "string", description: "Set true to replace existing value instead of appending", enumValues: ["true", "false"])
+                ],
+                required: ["agentId", "text"]
+            ),
+            handler: { args in
+                let submit = (args["submit"] ?? "false").lowercased() == "true"
+                let replace = (args["replace"] ?? "false").lowercased() == "true"
+                return try await MediaTools.browserTileType(
+                    agentIDString: args["agentId"] ?? "",
+                    text: args["text"] ?? "",
+                    submit: submit,
+                    replace: replace
+                )
+            }
+        ))
+
+        register(RegisteredTool(
+            name: "browser_tile_press_key",
+            description: "Send a keyboard key event to the active element in the browser tile (for Enter, Escape, arrows, shortcuts, etc.).",
+            category: .screenshot,
+            riskLevel: .low,
+            parameters: AIToolParameters(
+                properties: [
+                    "agentId": AIToolProperty(type: "string", description: "UUID of the agent whose browser tile receives the key event"),
+                    "key": AIToolProperty(type: "string", description: "Key value, e.g. Enter, Escape, Tab, ArrowDown, a"),
+                    "modifiers": AIToolProperty(type: "string", description: "Optional comma-separated modifiers: cmd,ctrl,alt,shift")
+                ],
+                required: ["agentId", "key"]
+            ),
+            handler: { args in
+                let modifiers = (args["modifiers"] ?? "")
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                return try await MediaTools.browserTilePressKey(
+                    agentIDString: args["agentId"] ?? "",
+                    key: args["key"] ?? "",
+                    modifiers: modifiers
+                )
+            }
+        ))
+
+        register(RegisteredTool(
+            name: "reload_browser_tile",
+            description: "Reload the current page in an agent's browser tile.",
+            category: .screenshot,
+            riskLevel: .low,
+            parameters: AIToolParameters(
+                properties: [
+                    "agentId": AIToolProperty(
+                        type: "string",
+                        description: "UUID of the agent whose browser tile to reload"
+                    )
+                ],
+                required: ["agentId"]
+            ),
+            handler: { args in
+                try await MediaTools.reloadBrowserTile(
+                    agentIDString: args["agentId"] ?? ""
+                )
+            }
+        ))
+
+        register(RegisteredTool(
+            name: "browser_tile_back",
+            description: "Go back in browser history for an agent's tile.",
+            category: .screenshot,
+            riskLevel: .low,
+            parameters: AIToolParameters(
+                properties: [
+                    "agentId": AIToolProperty(
+                        type: "string",
+                        description: "UUID of the agent whose browser tile should go back"
+                    )
+                ],
+                required: ["agentId"]
+            ),
+            handler: { args in
+                try await MediaTools.browserTileBack(
+                    agentIDString: args["agentId"] ?? ""
+                )
+            }
+        ))
+
+        register(RegisteredTool(
+            name: "browser_tile_forward",
+            description: "Go forward in browser history for an agent's tile.",
+            category: .screenshot,
+            riskLevel: .low,
+            parameters: AIToolParameters(
+                properties: [
+                    "agentId": AIToolProperty(
+                        type: "string",
+                        description: "UUID of the agent whose browser tile should go forward"
+                    )
+                ],
+                required: ["agentId"]
+            ),
+            handler: { args in
+                try await MediaTools.browserTileForward(
+                    agentIDString: args["agentId"] ?? ""
+                )
+            }
+        ))
+
+        register(RegisteredTool(
+            name: "release_browser_tile",
+            description: "Close and release an agent's browser tile from the virtual workspace canvas.",
+            category: .screenshot,
+            riskLevel: .low,
+            parameters: AIToolParameters(
+                properties: [
+                    "agentId": AIToolProperty(
+                        type: "string",
+                        description: "UUID of the agent whose browser tile to release"
+                    )
+                ],
+                required: ["agentId"]
+            ),
+            handler: { args in
+                try await MediaTools.releaseBrowserTile(
+                    agentIDString: args["agentId"] ?? ""
                 )
             }
         ))

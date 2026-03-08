@@ -679,7 +679,7 @@ enum MediaTools {
         }
     }
 
-    /// Capture the agent's 4 000 × 4 000 browser tile as a JPEG.
+    /// Capture the agent's browser tile as a JPEG.
     /// The captured image is written to `path` if provided, and the path is returned.
     static func captureAgentScreen(agentIDString: String, path: String) async throws -> String {
         guard let agentID = UUID(uuidString: agentIDString) else {
@@ -727,10 +727,210 @@ enum MediaTools {
         guard let agentID = UUID(uuidString: agentIDString) else {
             throw ToolError.commandFailed("Invalid agentId '\(agentIDString)'")
         }
-        await MainActor.run {
+        let didNavigate = await MainActor.run {
             VirtualDisplayManager.shared.navigate(agentID: agentID, to: url)
         }
+        guard didNavigate else {
+            throw ToolError.commandFailed(
+                "Could not navigate tile for agent \(agentIDString). " +
+                "Provide a valid http(s) URL (example: https://example.com)."
+            )
+        }
         return "Navigated agent \(agentIDString.prefix(8)) tile to \(url)"
+    }
+
+    /// Return detailed state for one browser tile.
+    static func getBrowserTileState(agentIDString: String) async throws -> String {
+        guard let agentID = UUID(uuidString: agentIDString) else {
+            throw ToolError.commandFailed("Invalid agentId '\(agentIDString)'")
+        }
+
+        guard let state = await MainActor.run(body: {
+            VirtualDisplayManager.shared.browserTileState(agentID: agentID)
+        }) else {
+            throw ToolError.commandFailed(
+                "No browser tile found for agent \(agentIDString). " +
+                "Call assign_browser_tile first."
+            )
+        }
+
+        return [
+            "Agent: \(state.agentID.uuidString)",
+            "Slot: \(state.slot)",
+            "Origin: (\(state.tileOriginX), \(state.tileOriginY))",
+            "Assigned URL: \(state.assignedURL ?? "(none)")",
+            "Loaded URL: \(state.loadedURL ?? "(none)")",
+            "Page Title: \(state.pageTitle ?? "(none)")",
+            "Can Go Back: \(state.canGoBack)",
+            "Can Go Forward: \(state.canGoForward)"
+        ].joined(separator: "\n")
+    }
+
+    /// Return all currently assigned browser tiles.
+    static func listBrowserTiles() async throws -> String {
+        let states = await MainActor.run(body: {
+            VirtualDisplayManager.shared.listBrowserTileStates()
+        })
+        if states.isEmpty {
+            return "No browser tiles assigned."
+        }
+
+        return states.map { state in
+            "- \(state.agentID.uuidString) | slot \(state.slot) | \(state.loadedURL ?? state.assignedURL ?? "(no url)")"
+        }.joined(separator: "\n")
+    }
+
+    /// Read title, URL, and visible text from a browser tile's current page.
+    static func readBrowserTilePage(agentIDString: String, maxChars: Int) async throws -> String {
+        guard let agentID = UUID(uuidString: agentIDString) else {
+            throw ToolError.commandFailed("Invalid agentId '\(agentIDString)'")
+        }
+        guard let page = await VirtualDisplayManager.shared.readBrowserPage(
+            agentID: agentID,
+            maxChars: maxChars
+        ) else {
+            throw ToolError.commandFailed(
+                "No browser tile found for agent \(agentIDString). " +
+                "Call assign_browser_tile first."
+            )
+        }
+
+        var lines: [String] = []
+        lines.append("Title: \(page.title.isEmpty ? "(untitled)" : page.title)")
+        lines.append("URL: \(page.url.isEmpty ? "(unknown)" : page.url)")
+        lines.append("")
+        lines.append(page.text.isEmpty ? "(No visible text extracted from page body.)" : page.text)
+        return lines.joined(separator: "\n")
+    }
+
+    /// Click a point inside the agent's browser tile viewport.
+    static func browserTileClick(
+        agentIDString: String,
+        x: Int,
+        y: Int,
+        button: String,
+        clicks: Int
+    ) async throws -> String {
+        guard let agentID = UUID(uuidString: agentIDString) else {
+            throw ToolError.commandFailed("Invalid agentId '\(agentIDString)'")
+        }
+        guard let result = await VirtualDisplayManager.shared.clickBrowserTile(
+            agentID: agentID,
+            x: x,
+            y: y,
+            button: button,
+            clicks: clicks
+        ) else {
+            throw ToolError.commandFailed(
+                "No browser tile found for agent \(agentIDString). Call assign_browser_tile first."
+            )
+        }
+        return result
+    }
+
+    /// Type text into the browser tile's active input field.
+    static func browserTileType(
+        agentIDString: String,
+        text: String,
+        submit: Bool,
+        replace: Bool
+    ) async throws -> String {
+        guard let agentID = UUID(uuidString: agentIDString) else {
+            throw ToolError.commandFailed("Invalid agentId '\(agentIDString)'")
+        }
+        guard let result = await VirtualDisplayManager.shared.typeInBrowserTile(
+            agentID: agentID,
+            text: text,
+            submit: submit,
+            replace: replace
+        ) else {
+            throw ToolError.commandFailed(
+                "No browser tile found for agent \(agentIDString). Call assign_browser_tile first."
+            )
+        }
+        return result
+    }
+
+    /// Send a key event to the browser tile's active element.
+    static func browserTilePressKey(
+        agentIDString: String,
+        key: String,
+        modifiers: [String]
+    ) async throws -> String {
+        guard let agentID = UUID(uuidString: agentIDString) else {
+            throw ToolError.commandFailed("Invalid agentId '\(agentIDString)'")
+        }
+        guard let result = await VirtualDisplayManager.shared.pressBrowserTileKey(
+            agentID: agentID,
+            key: key,
+            modifiers: modifiers
+        ) else {
+            throw ToolError.commandFailed(
+                "No browser tile found for agent \(agentIDString). Call assign_browser_tile first."
+            )
+        }
+        return result
+    }
+
+    static func reloadBrowserTile(agentIDString: String) async throws -> String {
+        guard let agentID = UUID(uuidString: agentIDString) else {
+            throw ToolError.commandFailed("Invalid agentId '\(agentIDString)'")
+        }
+        let ok = await MainActor.run {
+            VirtualDisplayManager.shared.reload(agentID: agentID)
+        }
+        guard ok else {
+            throw ToolError.commandFailed("No browser tile found for agent \(agentIDString).")
+        }
+        return "Reloaded browser tile for agent \(agentIDString.prefix(8))."
+    }
+
+    static func browserTileBack(agentIDString: String) async throws -> String {
+        guard let agentID = UUID(uuidString: agentIDString) else {
+            throw ToolError.commandFailed("Invalid agentId '\(agentIDString)'")
+        }
+        let ok = await MainActor.run {
+            VirtualDisplayManager.shared.goBack(agentID: agentID)
+        }
+        guard ok else {
+            throw ToolError.commandFailed(
+                "Cannot go back for agent \(agentIDString). " +
+                "Tile may not exist or there is no back history."
+            )
+        }
+        return "Navigated back for agent \(agentIDString.prefix(8))."
+    }
+
+    static func browserTileForward(agentIDString: String) async throws -> String {
+        guard let agentID = UUID(uuidString: agentIDString) else {
+            throw ToolError.commandFailed("Invalid agentId '\(agentIDString)'")
+        }
+        let ok = await MainActor.run {
+            VirtualDisplayManager.shared.goForward(agentID: agentID)
+        }
+        guard ok else {
+            throw ToolError.commandFailed(
+                "Cannot go forward for agent \(agentIDString). " +
+                "Tile may not exist or there is no forward history."
+            )
+        }
+        return "Navigated forward for agent \(agentIDString.prefix(8))."
+    }
+
+    static func releaseBrowserTile(agentIDString: String) async throws -> String {
+        guard let agentID = UUID(uuidString: agentIDString) else {
+            throw ToolError.commandFailed("Invalid agentId '\(agentIDString)'")
+        }
+        let hadTile = await MainActor.run {
+            VirtualDisplayManager.shared.browserTileState(agentID: agentID) != nil
+        }
+        guard hadTile else {
+            throw ToolError.commandFailed("No browser tile found for agent \(agentIDString).")
+        }
+        await MainActor.run {
+            VirtualDisplayManager.shared.releaseTile(for: agentID)
+        }
+        return "Released browser tile for agent \(agentIDString.prefix(8))."
     }
 }
 

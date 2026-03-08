@@ -70,7 +70,7 @@ final class AppState: ObservableObject {
     @Published var selectedHistoryAgentId: UUID?
 
     // MARK: - Browser Workspace
-    @Published var selectedBrowserAgentId: UUID?
+    @Published var selectedBrowserConversationId: UUID?
 
     // MARK: - Automations
     @Published var automations: [AutomationRule] = [] {
@@ -97,6 +97,7 @@ final class AppState: ObservableObject {
     // MARK: - Private Storage
     private let conversationsFileName = "conversations.json"
     private let automationsFileName   = "automations.json"
+    private let browserWorkspaceConversationPrefix = "[Browser Workspace]"
 
     #if os(macOS)
     var automationEngine: AutomationEngine?
@@ -444,6 +445,85 @@ final class AppState: ObservableObject {
         return conv
     }
 
+    func isBrowserWorkspaceConversation(_ conv: Conversation) -> Bool {
+        (conv.title ?? "").hasPrefix(browserWorkspaceConversationPrefix)
+    }
+
+    func browserWorkspaceTitle(for conv: Conversation, agents: [Agent]? = nil) -> String {
+        let raw = conv.title ?? ""
+        let trimmed = raw.replacingOccurrences(of: browserWorkspaceConversationPrefix, with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        let sourceAgents = agents ?? self.agents
+        if let firstId = conv.participantIds.first,
+           let agent = sourceAgents.first(where: { $0.id == firstId }) {
+            return agent.name
+        }
+        return "Browser Tab"
+    }
+
+    func browserWorkspaceConversations() -> [Conversation] {
+        conversations
+            .filter(isBrowserWorkspaceConversation)
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    @discardableResult
+    func createBrowserWorkspaceConversation(
+        agentId: UUID,
+        title: String? = nil,
+        select: Bool = true,
+        copyFrom sourceConversationId: UUID? = nil
+    ) -> Conversation? {
+        guard agents.contains(where: { $0.id == agentId }) else { return nil }
+        let baseTitle = title?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveTitle = (baseTitle?.isEmpty == false)
+            ? baseTitle!
+            : (agents.first(where: { $0.id == agentId })?.name ?? "Browser Tab")
+
+        let copiedMessages: [SpaceMessage]
+        if let sourceConversationId,
+           let source = conversations.first(where: { $0.id == sourceConversationId }) {
+            copiedMessages = source.messages
+                .filter { !$0.isStreaming }
+                .map { msg in
+                    SpaceMessage(
+                        role: msg.role,
+                        content: msg.content,
+                        agentId: msg.agentId,
+                        timestamp: msg.timestamp,
+                        isStreaming: false,
+                        imageData: msg.imageData
+                    )
+                }
+        } else {
+            copiedMessages = []
+        }
+
+        let conv = Conversation(
+            title: "\(browserWorkspaceConversationPrefix) \(effectiveTitle)",
+            participantIds: [agentId],
+            messages: copiedMessages
+        )
+        conversations.insert(conv, at: 0)
+        saveConversations()
+        if select {
+            selectedBrowserConversationId = conv.id
+            selectedSidebarItem = .browser
+        }
+        return conv
+    }
+
+    func deleteBrowserWorkspaceConversation(id: UUID) {
+        stopResponse(in: id)
+        conversations.removeAll { $0.id == id }
+        if selectedBrowserConversationId == id {
+            selectedBrowserConversationId = browserWorkspaceConversations().first?.id
+        }
+        saveConversations()
+    }
+
     func deleteConversation(id: UUID) {
         stopResponse(in: id)
         conversations.removeAll { $0.id == id }
@@ -527,6 +607,7 @@ final class AppState: ObservableObject {
 
         let convParticipants = agents.filter { conversations[index].participantIds.contains($0.id) }
         let isGroup = convParticipants.count > 1
+        let isBrowserWorkspaceSession = isBrowserWorkspaceConversation(conversations[index])
         var aiMessages: [AIMessage] = history.compactMap { msg in
             if msg.role == .user {
                 return AIMessage(role: .user, content: msg.content, imageData: msg.imageData)
@@ -567,6 +648,29 @@ final class AppState: ObservableObject {
         if let allowlist = toolNameAllowlist {
             tools = tools.filter { allowlist.contains($0.name) }
         }
+        if isBrowserWorkspaceSession {
+            let browserPriority: [String: Int] = [
+                "assign_browser_tile": 0,
+                "navigate_browser_tile": 1,
+                "get_browser_tile_state": 2,
+                "read_browser_tile_page": 3,
+                "browser_tile_click": 4,
+                "browser_tile_type": 5,
+                "browser_tile_press_key": 6,
+                "capture_agent_screen": 7,
+                "reload_browser_tile": 8,
+                "browser_tile_back": 9,
+                "browser_tile_forward": 10,
+                "list_browser_tiles": 11,
+                "release_browser_tile": 12
+            ]
+            tools = tools.sorted { lhs, rhs in
+                let l = browserPriority[lhs.name] ?? 10_000
+                let r = browserPriority[rhs.name] ?? 10_000
+                if l != r { return l < r }
+                return lhs.name < rhs.name
+            }
+        }
 
         let effectiveSystemPrompt: String? = {
             var parts: [String] = []
@@ -597,13 +701,23 @@ final class AppState: ObservableObject {
                 parts.append("""
                 You are in Agent Mode. \(modeDescription)
 
-                ═══ MULTI-STEP TASK EXECUTION ═══
-                For any task that requires multiple steps (research → reason → write, open app → interact → verify, etc.):
-                  1. PLAN silently: identify every step needed to fully complete the task.
-                  2. EXECUTE each step immediately using the appropriate tool — do NOT narrate future steps, just do them.
-                  3. CHAIN results: use the output of one tool as input to the next tool call.
-                  4. ONLY give a final text response when EVERY step is 100% complete.
-                  5. NEVER stop mid-task and ask the user to continue or do anything manually.
+                ═══ AUTONOMOUS EXECUTION PROTOCOL (STRICT) ═══
+                Goal: fully complete the user's request end-to-end without redundant follow-up questions.
+
+                OPERATING LOOP:
+                  1. Infer intent and the final deliverable.
+                  2. Execute the next best tool call immediately.
+                  3. Chain tool results into the next action.
+                  4. Continue until completion, then send a concise final result.
+
+                QUESTION POLICY:
+                  • DO NOT ask for confirmation for routine, reversible actions needed to complete the request.
+                  • DO NOT ask "what next?" after partial progress.
+                  • Ask the user only when truly blocked by missing required information that cannot be inferred:
+                    - Missing secret/credential that is required right now
+                    - Ambiguous high-impact target (multiple risky interpretations)
+                    - Irreversible/destructive action not explicitly requested
+                  • If blocked, ask ONE concise question only.
 
                 EXAMPLE — "search for X, then write a report on the Desktop":
                   Step 1 → call web_search("X")
@@ -611,10 +725,14 @@ final class AppState: ObservableObject {
                   Step 3 → call write_file(path: "/Users/<user>/Desktop/report.txt", content: <full report>)
                   Step 4 → respond: "Done — report saved to your Desktop."
 
-                EXAMPLE — "open Safari and go to apple.com":
-                  Step 1 → call open_application("Safari")
-                  Step 2 → call run_applescript to navigate to the URL
+                EXAMPLE — "open a page in Browser Workspace":
+                  Step 1 → call assign_browser_tile(agentId: "<your agent UUID>")
+                  Step 2 → call navigate_browser_tile(agentId: "<your agent UUID>", url: "https://apple.com")
                   Step 3 → respond with result.
+
+                FAILURE RECOVERY:
+                  • If a step fails, try at least 2 different automated approaches before asking the user.
+                  • Never hand the task back to the user for manual clicking/typing unless all automated paths fail.
 
                 ═══ TOOL SELECTION GUIDE ═══
 
@@ -653,6 +771,15 @@ final class AppState: ObservableObject {
                 • Wi-Fi info            → get_wifi_info (SSID, signal, channel)
                 • Network details       → get_network_interfaces (IPs, external IP, DNS)
                 • Connectivity check    → ping_host (latency test)
+
+                BROWSER WORKSPACE (NATIVE EMBEDDED BROWSER):
+                • Assign tile            → assign_browser_tile
+                • Open/navigate URL      → navigate_browser_tile
+                • Read current page      → read_browser_tile_page, get_browser_tile_state
+                • Virtual mouse + input  → browser_tile_click, browser_tile_type, browser_tile_press_key
+                • Visual verification    → capture_agent_screen
+                • History & refresh      → browser_tile_back, browser_tile_forward, reload_browser_tile
+                • Tile management        → list_browser_tiles, release_browser_tile
 
                 SCREEN & UI CONTROL:
                 • Screen interaction    → get_screen_info, click_mouse, type_text, press_key, take_screenshot, scroll_mouse, move_mouse
@@ -718,7 +845,7 @@ final class AppState: ObservableObject {
 
                 PRIORITY ORDER for UI interaction:
                   1. run_applescript — interact by element name, no coordinates needed (most reliable)
-                  2. JavaScript via AppleScript — for web browsers (never misses, not affected by zoom)
+                  2. JavaScript via AppleScript — for EXTERNAL web browsers only (never misses, not affected by zoom)
                   3. click_mouse — pixel click, last resort only
 
                 AppleScript — native app UI:
@@ -732,7 +859,7 @@ final class AppState: ObservableObject {
                         end tell
                     end tell
 
-                JavaScript via AppleScript — web browsers (ALWAYS prefer this over click_mouse in browsers):
+                JavaScript via AppleScript — external web browsers (ALWAYS prefer this over click_mouse in external browsers):
                     -- Click a tab / link by text or selector:
                     tell application "Google Chrome"
                         tell active tab of front window
@@ -749,11 +876,12 @@ final class AppState: ObservableObject {
                 If a click or action doesn't produce the expected result:
                   1. NEVER repeat the identical click at "slightly adjusted" coordinates — that rarely works.
                   2. NEVER tell the user to click manually — try a different method instead.
-                  3. For browser clicks that failed → switch to JavaScript or navigate by URL directly.
-                  4. For native app clicks that failed → switch to System Events AppleScript by element name.
-                  5. If still failing after 2 attempts → take_screenshot, re-read the full UI, pick a completely
+                  3. For Browser Workspace tasks → use browser_tile_click / browser_tile_type / browser_tile_press_key and verify with read_browser_tile_page.
+                  4. For external browser clicks that failed → switch to JavaScript or navigate by URL directly.
+                  5. For native app clicks that failed → switch to System Events AppleScript by element name.
+                  6. If still failing after 2 attempts → take_screenshot, re-read the full UI, pick a completely
                      different approach (e.g. keyboard shortcut, menu item, URL navigation).
-                  6. Only after exhausting ALL automated approaches may you report that the action failed.
+                  7. Only after exhausting ALL automated approaches may you report that the action failed.
 
                 ═══ SCREENSHOT POLICY ═══
                 • Do NOT take screenshots by default after every step.
@@ -767,7 +895,53 @@ final class AppState: ObservableObject {
                 4. Desktop path: use execute_command("echo $HOME") to get the user's home, then write to $HOME/Desktop/.
                 """)
 
-                if !desktopControlEnabled {
+                if isBrowserWorkspaceSession {
+                    parts.append("""
+                    ⚠️ BROWSER WORKSPACE MODE (STRICT PRIORITY) ⚠️
+                    You are currently operating inside a Browser Workspace tab.
+                    Your browser surface is the embedded tile, not external Safari/Chrome windows.
+                    Your `agentId` for browser tile tools is: \(agent.id.uuidString)
+
+                    REQUIRED BROWSER TOOL PRIORITY:
+                    1. assign_browser_tile(agentId: "\(agent.id.uuidString)") if no tile exists
+                    2. navigate_browser_tile(agentId: "\(agent.id.uuidString)", url: "<target page>")
+                    3. browser_tile_click / browser_tile_type / browser_tile_press_key for in-page interaction
+                    4. read_browser_tile_page / get_browser_tile_state / capture_agent_screen for verification
+                    5. reload_browser_tile / browser_tile_back / browser_tile_forward for navigation control
+
+                    INTERACTION POLICY:
+                    • For buttons, links, boards, canvases, and editors inside the tile, use browser_tile_click first.
+                    • For forms/chat/editors, use browser_tile_type and browser_tile_press_key instead of asking the user to type.
+                    • Do not rely only on URL jumps when a task requires real in-page interactions.
+
+                    PAGE CHOICE POLICY:
+                    • You MAY and SHOULD choose which pages/URLs to open to complete the task.
+                    • Do not wait for the user to specify every URL when the intent is clear.
+                    • Pick direct destination pages over homepages/search pages when possible.
+                    • NEVER ask the user to type a URL or press the Go button — call `navigate_browser_tile` yourself.
+
+                    OUTSIDE-BROWSER TOOLS:
+                    • Keep all tools available, but in Browser Workspace avoid `open_application("Safari")`,
+                      `open_url`, and `read_browser_page` unless the user explicitly requests controlling an external browser app.
+                    • Default behavior must stay inside the Browser Workspace tile.
+                    """)
+                }
+
+                if desktopControlEnabled {
+                    parts.append("""
+                    ⚡ DESKTOP MODE PROTOCOL (MOUSE + KEYBOARD ENABLED) ⚡
+                    Desktop Control is ON. You may use:
+                    • Mouse tools: move_mouse, click_mouse, scroll_mouse
+                    • Keyboard tools: type_text, press_key
+                    • App launch: open_application
+
+                    DESKTOP EXECUTION ORDER:
+                    1. Prefer deterministic control first: run_applescript, focus_window, list_windows, keyboard shortcuts.
+                    2. Use mouse coordinates only when element-based automation is unavailable.
+                    3. After each major UI action, verify state and continue immediately.
+                    4. Keep driving the workflow end-to-end; do not pause to ask what to do next.
+                    """)
+                } else {
                     parts.append("""
                     ⚠️ DESKTOP CONTROL RESTRICTION ⚠️
                     The following tools are NOT available:
