@@ -421,6 +421,7 @@ struct APIKeysTab: View {
     @State private var anthropicKey = ""
     @State private var geminiKey = ""
     @State private var qwenKey = ""
+    @State private var glmKey = ""
     @State private var braveKey = ""
 
     // Saved-flash state
@@ -463,6 +464,14 @@ struct APIKeysTab: View {
                 title: "Aliyun Qwen",
                 placeholder: "sk-…",
                 key: $qwenKey
+            )
+
+            apiKeySection(
+                provider: .glm,
+                icon: "bolt.fill", color: .indigo,
+                title: "Z.AI GLM",
+                placeholder: "API key…",
+                key: $glmKey
             )
 
             // Brave Search API
@@ -585,7 +594,7 @@ struct APIKeysTab: View {
 
     private func loadKeyStatus() {
         let repo = AIProviderRepository()
-        for provider in [AIProvider.openai, .anthropic, .gemini, .qwen] {
+        for provider in [AIProvider.openai, .anthropic, .gemini, .qwen, .glm] {
             hasKey[provider] = (try? repo.getAPIKey(for: provider)).flatMap { $0.isEmpty ? nil : $0 } != nil
         }
         let bk = UserDefaults.standard.string(forKey: "settings.braveAPIKey") ?? ""

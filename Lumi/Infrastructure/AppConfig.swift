@@ -68,6 +68,7 @@ enum AppConfig {
         .anthropic: "claude-sonnet-4-20250514",
         .gemini: "gemini-2.5-flash",
         .qwen: "qwen-plus",
+        .glm: "glm-4.5",
         .ollama: ""
     ]
 
